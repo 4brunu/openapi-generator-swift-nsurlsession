@@ -1,0 +1,7 @@
+{
+  "podSummary": "OpenAPIClient helps to integrate with the backend!",
+  "podHomepage": "https://github.com/OpenAPITools/openapi-generator",
+  "podAuthors": "openapi-generator",
+  "podVersion": "0.0.1",
+  "projectName": "OpenAPIClient"
+}
