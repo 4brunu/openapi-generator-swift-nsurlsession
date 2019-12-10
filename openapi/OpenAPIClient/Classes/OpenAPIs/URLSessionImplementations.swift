@@ -168,7 +168,7 @@ open class URLSessionRequestBuilder<T>: RequestBuilder<T> {
 
     }
 
-    fileprivate func processRequest(request: URLSessionDataTask, _ urlSessionId: String, _ completion: @escaping (_ response: Response<T>?, _ error: Error?) -> Void) {
+    fileprivate func processRequest(request: URLRequest, _ urlSessionId: String, _ completion: @escaping (_ response: Response<T>?, _ error: Error?) -> Void) {
         if let credential = self.credential {
             #warning("TODO")
             //            request.authenticate(usingCredential: credential)
@@ -178,46 +178,53 @@ open class URLSessionRequestBuilder<T>: RequestBuilder<T> {
             urlSessionStore[urlSessionId] = nil
         }
         
-        let validatedRequest = request.validate()
+        #warning("HERE!")
+        //        let validatedRequest = request.validate()
         
-        switch T.self {
-        case is String.Type:
-            validatedRequest.responseString(completionHandler: { (stringResponse) in
-                cleanupRequest()
+        createURLSession().dataTask(with: request) { data, response, error in
+            
+            cleanupRequest()
+            
+            switch T.self {
+            case is String.Type:
                 
-                if stringResponse.result.isFailure {
+                if let error = error {
                     completion(
                         nil,
-                        ErrorResponse.error(stringResponse.response?.statusCode ?? 500, stringResponse.data, stringResponse.result.error!)
+                        ErrorResponse.error(response?.statusCode ?? 500, data, error)
                     )
                     return
                 }
                 
+                let body = data.flatMap { String(data: $0, encoding: .utf8) } ?? ""
+                
                 completion(
-                    Response(
-                        response: stringResponse.response!,
-                        body: ((stringResponse.result.value ?? "") as! T)
+                    Response<T>(
+                        response: response as! HTTPURLResponse,
+                        body: body as? T
                     ),
                     nil
                 )
-            })
-        case is URL.Type:
-            validatedRequest.responseData(completionHandler: { (dataResponse) in
-                cleanupRequest()
                 
+            case is URL.Type:
                 do {
                     
-                    guard !dataResponse.result.isFailure else {
+                    guard error == nil else {
                         throw DownloadException.responseFailed
                     }
                     
-                    guard let data = dataResponse.data else {
+                    guard let data = data else {
                         throw DownloadException.responseDataMissing
                     }
                     
-                    guard let request = request.request else {
+                    guard let response = response as? HTTPURLResponse else {
+                        #warning("HERE! Wrong exception")
                         throw DownloadException.requestMissing
                     }
+                    
+//                    guard let request = request else {
+//                        throw DownloadException.requestMissing
+//                    }
                     
                     let fileManager = FileManager.default
                     let urlRequest = try request.asURLRequest()
@@ -226,7 +233,7 @@ open class URLSessionRequestBuilder<T>: RequestBuilder<T> {
                     
                     var requestPath = try self.getPath(from: requestURL)
                     
-                    if let headerFileName = self.getFileName(fromContentDisposition: dataResponse.response?.allHeaderFields["Content-Disposition"] as? String) {
+                    if let headerFileName = self.getFileName(fromContentDisposition: response.allHeaderFields["Content-Disposition"] as? String) {
                         requestPath = requestPath.appending("/\(headerFileName)")
                     }
                     
@@ -238,63 +245,62 @@ open class URLSessionRequestBuilder<T>: RequestBuilder<T> {
                     
                     completion(
                         Response(
-                            response: dataResponse.response!,
+                            response: response,
                             body: (filePath as! T)
                         ),
                         nil
                     )
                     
                 } catch let requestParserError as DownloadException {
-                    completion(nil, ErrorResponse.error(400, dataResponse.data, requestParserError))
+                    completion(nil, ErrorResponse.error(400, data, requestParserError))
                 } catch let error {
-                    completion(nil, ErrorResponse.error(400, dataResponse.data, error))
+                    completion(nil, ErrorResponse.error(400, data, error))
                 }
+            
+            case is Void.Type:
+            
+            if let error = error {
+                completion(
+                    nil,
+                    ErrorResponse.error(response?.statusCode ?? 500, data, error)
+                )
                 return
-            })
-        case is Void.Type:
-            validatedRequest.responseData(completionHandler: { (voidResponse) in
-                cleanupRequest()
-                
-                if voidResponse.result.isFailure {
-                    completion(
-                        nil,
-                        ErrorResponse.error(voidResponse.response?.statusCode ?? 500, voidResponse.data, voidResponse.result.error!)
-                    )
-                    return
-                }
-                
+            }
+            
+            completion(
+                Response(
+                    response: response as! HTTPURLResponse,
+                    body: nil
+                ),
+                nil
+            )
+            
+            default:
+            
+            if let error = error {
                 completion(
-                    Response(
-                        response: voidResponse.response!,
-                        body: nil),
-                    nil
+                    nil,
+                    ErrorResponse.error(response?.statusCode ?? 500, data, error)
                 )
-            })
-        default:
-            validatedRequest.responseData(completionHandler: { (dataResponse) in
-                cleanupRequest()
-                
-                if dataResponse.result.isFailure {
-                    completion(
-                        nil,
-                        ErrorResponse.error(dataResponse.response?.statusCode ?? 500, dataResponse.data, dataResponse.result.error!)
-                    )
-                    return
-                }
-                
-                completion(
-                    Response(
-                        response: dataResponse.response!,
-                        body: (dataResponse.data as! T)
-                    ),
-                    nil
-                )
-            })
+                return
+            }
+            
+            completion(
+                Response(
+                    response: response as! HTTPURLResponse,
+                    body: data as? T
+                ),
+                nil
+            )
         }
+        }.resume()
+        
     }
 
     open func buildHeaders() -> [String: String] {
-        var httpHeaders = SessionManager.defaultHTTPHeaders
+        #warning("HERE!")
+//        var httpHeaders = SessionManager.defaultHTTPHeaders
+        var httpHeaders: [String: String] = [:]
         for (key, value) in self.headers {
             httpHeaders[key] = value
         }
@@ -354,6 +360,15 @@ open class URLSessionRequestBuilder<T>: RequestBuilder<T> {
 
 }
 
+extension URLResponse {
+    var statusCode: Int? {
+        guard let httpResponse = self as? HTTPURLResponse else {
+            return nil
+        }
+        return httpResponse.statusCode
+    }
+}
+
 fileprivate enum DownloadException : Error {
     case responseDataMissing
     case responseFailed
@@ -369,95 +384,97 @@ public enum URLSessionDecodableRequestBuilderError: Error {
     case generalError(Error)
 }
 
+#warning("HERE!")
 open class URLSessionDecodableRequestBuilder<T:Decodable>: URLSessionRequestBuilder<T> {
 
-    override fileprivate func processRequest(request: DataRequest, _ managerId: String, _ completion: @escaping (_ response: Response<T>?, _ error: Error?) -> Void) {
+    fileprivate func processRequest(request: URLRequest, _ urlSessionId: String, _ completion: @escaping (_ response: Response<T>?, _ error: Error?) -> Void) {
         if let credential = self.credential {
-            request.authenticate(usingCredential: credential)
+            #warning("TODO")
+            //            request.authenticate(usingCredential: credential)
         }
-
+        
         let cleanupRequest = {
-            managerStore[managerId] = nil
+            urlSessionStore[urlSessionId] = nil
         }
-
-        let validatedRequest = request.validate()
-
-        switch T.self {
-        case is String.Type:
-            validatedRequest.responseString(completionHandler: { (stringResponse) in
-                cleanupRequest()
-
-                if stringResponse.result.isFailure {
+        
+        #warning("HERE!")
+        //        let validatedRequest = request.validate()
+        
+        createURLSession().dataTask(with: request) { data, response, error in
+            
+            cleanupRequest()
+            
+            switch T.self {
+            case is String.Type:
+                
+                if let error = error {
                     completion(
                         nil,
-                        ErrorResponse.error(stringResponse.response?.statusCode ?? 500, stringResponse.data, stringResponse.result.error!)
+                        ErrorResponse.error(response?.statusCode ?? 500, data, error)
                     )
                     return
                 }
-
+                
+                let body = data.flatMap { String(data: $0, encoding: .utf8) } ?? ""
+                
                 completion(
-                    Response(
-                        response: stringResponse.response!,
-                        body: ((stringResponse.result.value ?? "") as! T)
+                    Response<T>(
+                        response: response as! HTTPURLResponse,
+                        body: body as? T
                     ),
                     nil
                 )
-            })
-        case is Void.Type:
-            validatedRequest.responseData(completionHandler: { (voidResponse) in
-                cleanupRequest()
-
-                if voidResponse.result.isFailure {
+                
+            case is Void.Type:
+                
+                if let error = error {
                     completion(
                         nil,
-                        ErrorResponse.error(voidResponse.response?.statusCode ?? 500, voidResponse.data, voidResponse.result.error!)
+                        ErrorResponse.error(response?.statusCode ?? 500, data, error)
                     )
                     return
                 }
-
+                
                 completion(
                     Response(
-                        response: voidResponse.response!,
-                        body: nil),
-                    nil
-                )
-            })
-        case is Data.Type:
-            validatedRequest.responseData(completionHandler: { (dataResponse) in
-                cleanupRequest()
-
-                if dataResponse.result.isFailure {
-                    completion(
-                        nil,
-                        ErrorResponse.error(dataResponse.response?.statusCode ?? 500, dataResponse.data, dataResponse.result.error!)
-                    )
-                    return
-                }
-
-                completion(
-                    Response(
-                        response: dataResponse.response!,
-                        body: (dataResponse.data as! T)
+                        response: response as! HTTPURLResponse,
+                        body: nil
                     ),
                     nil
                 )
-            })
-        default:
-            validatedRequest.responseData(completionHandler: { (dataResponse: DataResponse<Data>) in
-                cleanupRequest()
-
-                guard dataResponse.result.isSuccess else {
-                    completion(nil, ErrorResponse.error(dataResponse.response?.statusCode ?? 500, dataResponse.data, dataResponse.result.error!))
+                
+            case is Data.Type:
+                
+                if let error = error {
+                    completion(
+                        nil,
+                        ErrorResponse.error(response?.statusCode ?? 500, data, error)
+                    )
+                    return
+                }
+                
+                completion(
+                    Response(
+                        response: response as! HTTPURLResponse,
+                        body: data as! T
+                    ),
+                    nil
+                )
+                
+            default:
+                
+                guard error != nil else {
+                    completion(nil, ErrorResponse.error(response?.statusCode ?? 500, data, error!))
                     return
                 }
 
-                guard let data = dataResponse.data, !data.isEmpty else {
-                    completion(nil, ErrorResponse.error(-1, nil, AlamofireDecodableRequestBuilderError.emptyDataResponse))
+                guard let data = data, !data.isEmpty else {
+                    completion(nil, ErrorResponse.error(-1, nil, URLSessionDecodableRequestBuilderError.emptyDataResponse))
                     return
                 }
 
-                guard let httpResponse = dataResponse.response else {
-                    completion(nil, ErrorResponse.error(-2, nil, AlamofireDecodableRequestBuilderError.nilHTTPResponse))
+                guard let httpResponse = response as? HTTPURLResponse else {
+                    completion(nil, ErrorResponse.error(-2, nil, URLSessionDecodableRequestBuilderError.nilHTTPResponse))
                     return
                 }
 
@@ -469,8 +486,10 @@ open class URLSessionDecodableRequestBuilder<T:Decodable>: URLSessionRequestBuil
                 }
 
                 completion(responseObj, decodeResult.error)
-            })
-        }
+                
+            }
+        }.resume()
+        
     }
 
 }
@@ -643,11 +662,12 @@ public struct URLEncoding: ParameterEncoding {
                 components += queryComponents(fromKey: arrayEncoding.encode(key: key), value: value)
             }
         } else if let value = value as? NSNumber {
-            if value.isBool {
-                components.append((escape(key), escape(boolEncoding.encode(value: value.boolValue))))
-            } else {
-                components.append((escape(key), escape("\(value)")))
-            }
+            #warning("HERE!")
+//            if value.isBool {
+//                components.append((escape(key), escape(boolEncoding.encode(value: value.boolValue))))
+//            } else {
+//                components.append((escape(key), escape("\(value)")))
+//            }
         } else if let bool = value as? Bool {
             components.append((escape(key), escape(boolEncoding.encode(value: bool))))
         } else {
