@@ -68,7 +68,7 @@ open class URLSessionRequestBuilder<T>: RequestBuilder<T> {
      May be overridden by a subclass if you want to custom request constructor.
      */
     open func createURLRequest() -> URLRequest? {
-        let encoding: ParameterEncoding = isBody ? JSONDataEncoding() : URLEncoding()
+        let encoding: ParameterEncoding1 = isBody ? JSONDataEncoding() : URLEncoding1()
         
         var originalRequest = URLRequest(url: URL(string: URLString)!)
         
@@ -96,7 +96,7 @@ open class URLSessionRequestBuilder<T>: RequestBuilder<T> {
      May be overridden by a subclass if you want to control the request
      configuration (e.g. to override the cache policy).
      */
-    open func makeRequest(urlSession: URLSession, method: HTTPMethod, encoding: ParameterEncoding, headers: [String:String]) -> URLRequest? {
+    open func makeRequest(urlSession: URLSession, method: HTTPMethod1, encoding: ParameterEncoding1, headers: [String:String]) -> URLRequest? {
 
         var originalRequest = URLRequest(url: URL(string: URLString)!)
         
@@ -119,9 +119,9 @@ open class URLSessionRequestBuilder<T>: RequestBuilder<T> {
         let urlSession = createURLSession()
         urlSessionStore[urlSessionId] = urlSession
 
-        let encoding:ParameterEncoding = isBody ? JSONDataEncoding() : URLEncoding()
+        let encoding:ParameterEncoding1 = isBody ? JSONDataEncoding() : URLEncoding1()
 
-        let xMethod = HTTPMethod(rawValue: method)
+        let xMethod = HTTPMethod1(rawValue: method)
         let fileKeys = parameters == nil ? [] : parameters!.filter { $1 is NSURL }
                                                            .map { $0.0 }
 
@@ -198,7 +198,7 @@ open class URLSessionRequestBuilder<T>: RequestBuilder<T> {
 
             body.append("--\(boundary)--\r\n")
                         
-            let request = makeRequest(urlSession: urlSession, method: xMethod!, encoding: encoding, headers: headers)
+            var request = makeRequest(urlSession: urlSession, method: xMethod!, encoding: encoding, headers: headers)
 
             request?.httpBody = body
             
@@ -606,7 +606,7 @@ open class URLSessionDecodableRequestBuilder<T:Decodable>: URLSessionRequestBuil
 
 }
 
-fileprivate enum HTTPMethod: String {
+public enum HTTPMethod1: String {
     case options = "OPTIONS"
     case get     = "GET"
     case head    = "HEAD"
@@ -616,4 +616,29 @@ fileprivate enum HTTPMethod: String {
     case delete  = "DELETE"
     case trace   = "TRACE"
     case connect = "CONNECT"
+}
+
+public protocol ParameterEncoding1 {
+    func encode(_ urlRequest: URLRequest, with parameters: [String: Any]?) throws -> URLRequest
+}
+
+class URLEncoding1: ParameterEncoding1 {
+    func encode(_ urlRequest: URLRequest, with parameters: [String : Any]?) throws -> URLRequest {
+        
+        var urlRequest = urlRequest
+        
+        guard let parameters = parameters else { return urlRequest }
+        
+        guard let url = urlRequest.url else {
+            #warning("HERE")
+            throw DownloadException.requestMissing
+        }
+
+        if var urlComponents = URLComponents(url: url, resolvingAgainstBaseURL: false), !parameters.isEmpty {
+            urlComponents.queryItems = APIHelper.mapValuesToQueryItems(parameters)
+            urlRequest.url = urlComponents.url
+        }
+        
+        return urlRequest
+    }
 }
