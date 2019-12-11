@@ -50,6 +50,9 @@ private struct SynchronizedDictionary<K: Hashable, V> {
 private var urlSessionStore = SynchronizedDictionary<String, URLSession>()
 
 open class URLSessionRequestBuilder<T>: RequestBuilder<T> {
+    
+    let urlSessionProgressTracker = URLSessionProgressTracker()
+    
     required public init(method: String, URLString: String, parameters: [String : Any]?, isBody: Bool, headers: [String : String] = [:]) {
         super.init(method: method, URLString: URLString, parameters: parameters, isBody: isBody, headers: headers)
     }
@@ -61,7 +64,7 @@ open class URLSessionRequestBuilder<T>: RequestBuilder<T> {
     open func createURLSession() -> URLSession {
         let configuration = URLSessionConfiguration.default
         configuration.httpAdditionalHeaders = buildHeaders()
-        return URLSession(configuration: configuration)
+        return URLSession(configuration: configuration, delegate: urlSessionProgressTracker, delegateQueue: nil)
     }
 
     /**
@@ -118,7 +121,7 @@ open class URLSessionRequestBuilder<T>: RequestBuilder<T> {
         // Create a new manager for each request to customize its request header
         let urlSession = createURLSession()
         urlSessionStore[urlSessionId] = urlSession
-
+                
         let encoding:ParameterEncoding1 = isBody ? JSONDataEncoding() : URLEncoding1()
 
         let xMethod = HTTPMethod1(rawValue: method)
@@ -202,14 +205,9 @@ open class URLSessionRequestBuilder<T>: RequestBuilder<T> {
 
             request?.httpBody = body
             
-            #warning("TODO")
-            //            if let onProgressReady = self.onProgressReady {
-            //                if #available(OSX 10.13, *) {
-            //                    onProgressReady(request!.progress)
-            //                }
-            //            }
+            onProgressReady?(urlSessionProgressTracker.progress)
             
-            processRequest(request: request!, urlSessionId, completion)
+            processRequest(urlSession: urlSession, request: request!, urlSessionId, completion)
 
 
             #warning("Done, but I'm not sure about the failure case")
@@ -244,18 +242,15 @@ open class URLSessionRequestBuilder<T>: RequestBuilder<T> {
 //            })
         } else {
             let request = makeRequest(urlSession: urlSession, method: xMethod!, encoding: encoding, headers: headers)
-            #warning("TODO")
-            //            if let onProgressReady = self.onProgressReady {
-            //                if #available(OSX 10.13, *) {
-            //                    onProgressReady(request!.progress)
-            //                }
-            //            }
-            processRequest(request: request!, urlSessionId, completion)
+            
+            onProgressReady?(urlSessionProgressTracker.progress)
+            
+            processRequest(urlSession: urlSession, request: request!, urlSessionId, completion)
         }
 
     }
 
-    fileprivate func processRequest(request: URLRequest, _ urlSessionId: String, _ completion: @escaping (_ response: Response<T>?, _ error: Error?) -> Void) {
+    fileprivate func processRequest(urlSession: URLSession, request: URLRequest, _ urlSessionId: String, _ completion: @escaping (_ response: Response<T>?, _ error: Error?) -> Void) {
         if let credential = self.credential {
             #warning("TODO")
             //            request.authenticate(usingCredential: credential)
@@ -268,7 +263,7 @@ open class URLSessionRequestBuilder<T>: RequestBuilder<T> {
         #warning("HERE!")
         //        let validatedRequest = request.validate()
         
-        createURLSession().dataTask(with: request) { data, response, error in
+        urlSession.dataTask(with: request) { data, response, error in
             
             cleanupRequest()
             
@@ -458,6 +453,22 @@ open class URLSessionRequestBuilder<T>: RequestBuilder<T> {
 
 }
 
+open class URLSessionProgressTracker: NSObject, URLSessionDelegate, URLSessionDataDelegate {
+    
+    let progress = Progress()
+
+    public func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive response: URLResponse, completionHandler: @escaping (URLSession.ResponseDisposition) -> Void) {
+        progress.totalUnitCount = response.expectedContentLength
+        completionHandler(.allow)
+    }
+    
+    public func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
+        progress.completedUnitCount = progress.completedUnitCount + Int64(data.count)
+    }
+    
+}
+
+
 extension Data {
     /// Append string to NSMutableData
     ///
@@ -499,7 +510,7 @@ public enum URLSessionDecodableRequestBuilderError: Error {
 #warning("HERE!")
 open class URLSessionDecodableRequestBuilder<T:Decodable>: URLSessionRequestBuilder<T> {
 
-    override fileprivate func processRequest(request: URLRequest, _ urlSessionId: String, _ completion: @escaping (_ response: Response<T>?, _ error: Error?) -> Void) {
+    override fileprivate func processRequest(urlSession: URLSession, request: URLRequest, _ urlSessionId: String, _ completion: @escaping (_ response: Response<T>?, _ error: Error?) -> Void) {
         if let credential = self.credential {
             #warning("TODO")
             //            request.authenticate(usingCredential: credential)
@@ -512,7 +523,7 @@ open class URLSessionDecodableRequestBuilder<T:Decodable>: URLSessionRequestBuil
         #warning("HERE!")
         //        let validatedRequest = request.validate()
         
-        createURLSession().dataTask(with: request) { data, response, error in
+        urlSession.dataTask(with: request) { data, response, error in
             
             cleanupRequest()
             
