@@ -126,6 +126,93 @@ open class URLSessionRequestBuilder<T>: RequestBuilder<T> {
                                                            .map { $0.0 }
 
         if fileKeys.count > 0 {
+            
+            var originalRequest = URLRequest(url: URL(string: URLString)!)
+
+            // https://stackoverflow.com/a/26163136/976628
+            let boundary = "Boundary-\(UUID().uuidString)"
+            originalRequest.addValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
+
+            var body = Data()
+                        
+            for (k, v) in self.parameters! {
+                switch v {
+                case let fileURL as URL:
+                    if let mimeType = self.contentTypeForFormPart(fileURL: fileURL) {
+                        body.append("--\(boundary)\r\n")
+                        body.append("Content-Disposition: form-data; name=\"\(fileURL.lastPathComponent)\"; filename=\"\(fileURL.lastPathComponent)\"\r\n")
+                        body.append("Content-Type: \(mimeType)\r\n\r\n")
+
+                        if let fileData = try? Data(contentsOf: fileURL) {
+                            body.append(fileData)
+                        }
+
+//                        mpForm.append(fileURL, withName: k, fileName: fileURL.lastPathComponent, mimeType: mimeType)
+                    }
+                    else {
+                        let mimetype = mimeType(for: fileURL)
+                        
+                        body.append("--\(boundary)\r\n")
+                        body.append("Content-Disposition: form-data; name=\"\(k)\"; filename=\"\(k)\"\r\n")
+                        body.append("Content-Type: \(mimetype)\r\n\r\n")
+
+                        if let fileData = try? Data(contentsOf: fileURL) {
+                            body.append(fileData)
+                        }
+
+                        
+//                        mpForm.append(fileURL, withName: k)
+                    }
+                case let string as String:
+                    body.append("--\(boundary)\r\n")
+                    body.append("Content-Disposition: form-data; name=\"\(k)\"; filename=\"\(k)\"\r\n")
+                    body.append(string)
+                    
+                    
+//                    mpForm.append(string.data(using: String.Encoding.utf8)!, withName: k)
+                case let number as NSNumber:
+                    body.append("--\(boundary)\r\n")
+                    body.append("Content-Disposition: form-data; name=\"\(k)\"; filename=\"\(k)\"\r\n")
+                    body.append(number.stringValue)
+                    
+//                    mpForm.append(number.stringValue.data(using: String.Encoding.utf8)!, withName: k)
+                default:
+                    fatalError("Unprocessable value \(v) with key \(k)")
+                }
+            }
+
+//            let fileUrl = URL(fileURLWithPath: filePath)
+//            let fileName = fileUrl.lastPathComponent
+//
+//            let mimetype = mimeType(for: filePath)
+//
+//            body.append("--\(boundary)\r\n")
+//            body.append("Content-Disposition: form-data; name=\"\(fileName)\"; filename=\"\(fileName)\"\r\n")
+//            body.append("Content-Type: \(mimetype)\r\n\r\n")
+//
+//            if let fileData = try? Data(contentsOf: fileUrl) {
+//                body.append(fileData)
+//            }
+
+            body.append("\r\n")
+
+            body.append("--\(boundary)--\r\n")
+                        
+            let request = makeRequest(urlSession: urlSession, method: xMethod!, encoding: encoding, headers: headers)
+
+            request?.httpBody = body
+            
+            #warning("TODO")
+            //            if let onProgressReady = self.onProgressReady {
+            //                if #available(OSX 10.13, *) {
+            //                    onProgressReady(request!.progress)
+            //                }
+            //            }
+            
+            processRequest(request: request!, urlSessionId, completion)
+
+
+            #warning("Done, but I'm not sure about the failure case")
 //            manager.upload(multipartFormData: { mpForm in
 //                for (k, v) in self.parameters! {
 //                    switch v {
@@ -357,7 +444,32 @@ open class URLSessionRequestBuilder<T>: RequestBuilder<T> {
 
         return url
     }
+    
+    func mimeType(for url: URL) -> String {
+        let pathExtension = url.pathExtension
 
+        if let uti = UTTypeCreatePreferredIdentifierForTag(kUTTagClassFilenameExtension, pathExtension as NSString, nil)?.takeRetainedValue() {
+            if let mimetype = UTTypeCopyPreferredTagWithClass(uti, kUTTagClassMIMEType)?.takeRetainedValue() {
+                return mimetype as String
+            }
+        }
+        return "application/octet-stream"
+    }
+
+}
+
+extension Data {
+    /// Append string to NSMutableData
+    ///
+    /// Rather than littering my code with calls to `dataUsingEncoding` to convert strings to NSData, and then add that data to the NSMutableData, this wraps it in a nice convenient little extension to NSMutableData. This converts using UTF-8.
+    ///
+    /// - parameter string:       The string to be added to the `NSMutableData`.
+
+    mutating func append(_ string: String) {
+        if let data = string.data(using: .utf8) {
+            append(data)
+        }
+    }
 }
 
 extension URLResponse {
@@ -387,7 +499,7 @@ public enum URLSessionDecodableRequestBuilderError: Error {
 #warning("HERE!")
 open class URLSessionDecodableRequestBuilder<T:Decodable>: URLSessionRequestBuilder<T> {
 
-    fileprivate func processRequest(request: URLRequest, _ urlSessionId: String, _ completion: @escaping (_ response: Response<T>?, _ error: Error?) -> Void) {
+    override fileprivate func processRequest(request: URLRequest, _ urlSessionId: String, _ completion: @escaping (_ response: Response<T>?, _ error: Error?) -> Void) {
         if let credential = self.credential {
             #warning("TODO")
             //            request.authenticate(usingCredential: credential)
