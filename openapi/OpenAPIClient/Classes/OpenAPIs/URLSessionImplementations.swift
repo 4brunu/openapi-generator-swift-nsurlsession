@@ -56,6 +56,12 @@ open class URLSessionRequestBuilder<T>: RequestBuilder<T> {
     required public init(method: String, URLString: String, parameters: [String : Any]?, isBody: Bool, headers: [String : String] = [:]) {
         super.init(method: method, URLString: URLString, parameters: parameters, isBody: isBody, headers: headers)
     }
+    
+    open override func addCredential() -> Self {
+        _ = super.addCredential()
+        urlSessionProgressTracker.credential = self.credential
+        return self
+    }
 
     /**
      May be overridden by a subclass if you want to control the session
@@ -174,17 +180,10 @@ open class URLSessionRequestBuilder<T>: RequestBuilder<T> {
     }
 
     fileprivate func processRequest(urlSession: URLSession, urlRequest: URLRequest, _ urlSessionId: String, _ completion: @escaping (_ response: Response<T>?, _ error: Error?) -> Void) {
-        if let credential = self.credential {
-            #warning("TODO")
-            //            request.authenticate(usingCredential: credential)
-        }
         
         let cleanupRequest = {
             urlSessionStore[urlSessionId] = nil
         }
-        
-        #warning("HERE!")
-        //        let validatedRequest = request.validate()
         
         urlSession.dataTask(with: urlRequest) { data, response, error in
             
@@ -406,6 +405,8 @@ open class URLSessionRequestBuilder<T>: RequestBuilder<T> {
 
 open class URLSessionProgressTracker: NSObject, URLSessionDelegate, URLSessionDataDelegate {
     
+    var credential: URLCredential?
+    
     let progress = Progress()
 
     public func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive response: URLResponse, completionHandler: @escaping (URLSession.ResponseDisposition) -> Void) {
@@ -415,6 +416,30 @@ open class URLSessionProgressTracker: NSObject, URLSessionDelegate, URLSessionDa
     
     public func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
         progress.completedUnitCount = progress.completedUnitCount + Int64(data.count)
+    }
+    
+//    public func urlSession(_ session: URLSession, task: URLSessionTask, didReceive challenge: URLAuthenticationChallenge, completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void) {
+//
+//    }
+    
+    public func urlSession(_ session: URLSession, didReceive challenge: URLAuthenticationChallenge, completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void) {
+
+        var disposition: URLSession.AuthChallengeDisposition = .performDefaultHandling
+        
+        var credential: URLCredential?
+
+        if challenge.previousFailureCount > 0 {
+            disposition = .rejectProtectionSpace
+        } else {
+            credential = self.credential ?? session.configuration.urlCredentialStorage?.defaultCredential(for: challenge.protectionSpace)
+
+            if credential != nil {
+                disposition = .useCredential
+            }
+        }
+        
+        completionHandler(disposition, credential)
+        
     }
     
 }
@@ -461,18 +486,11 @@ public enum URLSessionDecodableRequestBuilderError: Error {
 open class URLSessionDecodableRequestBuilder<T:Decodable>: URLSessionRequestBuilder<T> {
 
     override fileprivate func processRequest(urlSession: URLSession, urlRequest request: URLRequest, _ urlSessionId: String, _ completion: @escaping (_ response: Response<T>?, _ error: Error?) -> Void) {
-        if let credential = self.credential {
-            #warning("TODO")
-            //            request.authenticate(usingCredential: credential)
-        }
         
         let cleanupRequest = {
             urlSessionStore[urlSessionId] = nil
         }
-        
-        #warning("HERE!")
-        //        let validatedRequest = request.validate()
-        
+                
         urlSession.dataTask(with: request) { data, response, error in
             
             cleanupRequest()
