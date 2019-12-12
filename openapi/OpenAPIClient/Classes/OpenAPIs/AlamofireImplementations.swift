@@ -17,35 +17,6 @@ class AlamofireRequestBuilderFactory: RequestBuilderFactory {
     }
 }
 
-private struct SynchronizedDictionary<K: Hashable, V> {
-
-     private var dictionary = [K: V]()
-     private let queue = DispatchQueue(
-         label: "SynchronizedDictionary",
-         qos: DispatchQoS.userInitiated,
-         attributes: [DispatchQueue.Attributes.concurrent],
-         autoreleaseFrequency: DispatchQueue.AutoreleaseFrequency.inherit,
-         target: nil
-     )
-
-     public subscript(key: K) -> V? {
-         get {
-             var value: V?
-
-             queue.sync {
-                 value = self.dictionary[key]
-             }
-
-             return value
-         }
-         set {
-             queue.sync(flags: DispatchWorkItemFlags.barrier) {
-                 self.dictionary[key] = newValue
-             }
-         }
-     }
- }
-
 // Store manager to retain its reference
 private var managerStore = SynchronizedDictionary<String, Alamofire.SessionManager>()
 
@@ -329,21 +300,6 @@ open class AlamofireRequestBuilder<T>: RequestBuilder<T> {
 
 }
 
-fileprivate enum DownloadException : Error {
-    case responseDataMissing
-    case responseFailed
-    case requestMissing
-    case requestMissingPath
-    case requestMissingURL
-}
-
-public enum AlamofireDecodableRequestBuilderError: Error {
-    case emptyDataResponse
-    case nilHTTPResponse
-    case jsonDecoding(DecodingError)
-    case generalError(Error)
-}
-
 open class AlamofireDecodableRequestBuilder<T:Decodable>: AlamofireRequestBuilder<T> {
 
     override fileprivate func processRequest(request: DataRequest, _ managerId: String, _ completion: @escaping (_ response: Response<T>?, _ error: Error?) -> Void) {
@@ -427,12 +383,12 @@ open class AlamofireDecodableRequestBuilder<T:Decodable>: AlamofireRequestBuilde
                 }
 
                 guard let data = dataResponse.data, !data.isEmpty else {
-                    completion(nil, ErrorResponse.error(-1, nil, AlamofireDecodableRequestBuilderError.emptyDataResponse))
+                    completion(nil, ErrorResponse.error(-1, nil, DecodableRequestBuilderError.emptyDataResponse))
                     return
                 }
 
                 guard let httpResponse = dataResponse.response else {
-                    completion(nil, ErrorResponse.error(-2, nil, AlamofireDecodableRequestBuilderError.nilHTTPResponse))
+                    completion(nil, ErrorResponse.error(-2, nil, DecodableRequestBuilderError.nilHTTPResponse))
                     return
                 }
 

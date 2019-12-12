@@ -17,41 +17,12 @@ class URLSessionRequestBuilderFactory: RequestBuilderFactory {
     }
 }
 
-private struct SynchronizedDictionary<K: Hashable, V> {
-
-     private var dictionary = [K: V]()
-     private let queue = DispatchQueue(
-         label: "SynchronizedDictionary",
-         qos: DispatchQoS.userInitiated,
-         attributes: [DispatchQueue.Attributes.concurrent],
-         autoreleaseFrequency: DispatchQueue.AutoreleaseFrequency.inherit,
-         target: nil
-     )
-
-     public subscript(key: K) -> V? {
-         get {
-             var value: V?
-
-             queue.sync {
-                 value = self.dictionary[key]
-             }
-
-             return value
-         }
-         set {
-             queue.sync(flags: DispatchWorkItemFlags.barrier) {
-                 self.dictionary[key] = newValue
-             }
-         }
-     }
- }
-
 // Store manager to retain its reference
 private var urlSessionStore = SynchronizedDictionary<String, URLSession>()
 
 open class URLSessionRequestBuilder<T>: RequestBuilder<T> {
     
-    let urlSessionProgressTracker = URLSessionProgressTracker()
+    let sessionDelegate = SessionDelegate()
     
     required public init(method: String, URLString: String, parameters: [String : Any]?, isBody: Bool, headers: [String : String] = [:]) {
         super.init(method: method, URLString: URLString, parameters: parameters, isBody: isBody, headers: headers)
@@ -59,7 +30,7 @@ open class URLSessionRequestBuilder<T>: RequestBuilder<T> {
     
     open override func addCredential() -> Self {
         _ = super.addCredential()
-        urlSessionProgressTracker.credential = self.credential
+        sessionDelegate.credential = self.credential
         return self
     }
 
@@ -70,7 +41,7 @@ open class URLSessionRequestBuilder<T>: RequestBuilder<T> {
     open func createURLSession() -> URLSession {
         let configuration = URLSessionConfiguration.default
         configuration.httpAdditionalHeaders = buildHeaders()
-        return URLSession(configuration: configuration, delegate: urlSessionProgressTracker, delegateQueue: nil)
+        return URLSession(configuration: configuration, delegate: sessionDelegate, delegateQueue: nil)
     }
 
     /**
@@ -155,7 +126,7 @@ open class URLSessionRequestBuilder<T>: RequestBuilder<T> {
                     }
                 }
                 
-                onProgressReady?(urlSessionProgressTracker.progress)
+                onProgressReady?(sessionDelegate.progress)
                 
                 processRequest(urlSession: urlSession, urlRequest: request, urlSessionId, completion)
                 
@@ -168,7 +139,7 @@ open class URLSessionRequestBuilder<T>: RequestBuilder<T> {
             do {
                 let request = try makeRequest(urlSession: urlSession, method: xMethod!, encoding: encoding, headers: headers)
                 
-                onProgressReady?(urlSessionProgressTracker.progress)
+                onProgressReady?(sessionDelegate.progress)
                 
                 processRequest(urlSession: urlSession, urlRequest: request, urlSessionId, completion)
                 
@@ -190,7 +161,7 @@ open class URLSessionRequestBuilder<T>: RequestBuilder<T> {
             cleanupRequest()
             
             guard let httpResponse = response as? HTTPURLResponse else {
-                completion(nil, ErrorResponse.error(-2, nil, URLSessionDecodableRequestBuilderError.nilHTTPResponse))
+                completion(nil, ErrorResponse.error(-2, nil, DecodableRequestBuilderError.nilHTTPResponse))
                 return
             }
             
@@ -200,7 +171,7 @@ open class URLSessionRequestBuilder<T>: RequestBuilder<T> {
                 if let error = error {
                     completion(
                         nil,
-                        ErrorResponse.error(response?.statusCode ?? 500, data, error)
+                        ErrorResponse.error(httpResponse.statusCode, data, error)
                     )
                     return
                 }
@@ -265,7 +236,7 @@ open class URLSessionRequestBuilder<T>: RequestBuilder<T> {
             if let error = error {
                 completion(
                     nil,
-                    ErrorResponse.error(response?.statusCode ?? 500, data, error)
+                    ErrorResponse.error(httpResponse.statusCode, data, error)
                 )
                 return
             }
@@ -283,7 +254,7 @@ open class URLSessionRequestBuilder<T>: RequestBuilder<T> {
             if let error = error {
                 completion(
                     nil,
-                    ErrorResponse.error(response?.statusCode ?? 500, data, error)
+                    ErrorResponse.error(httpResponse.statusCode, data, error)
                 )
                 return
             }
@@ -403,7 +374,109 @@ open class URLSessionRequestBuilder<T>: RequestBuilder<T> {
 
 }
 
-open class URLSessionProgressTracker: NSObject, URLSessionDelegate, URLSessionDataDelegate {
+open class URLSessionDecodableRequestBuilder<T:Decodable>: URLSessionRequestBuilder<T> {
+
+    override fileprivate func processRequest(urlSession: URLSession, urlRequest request: URLRequest, _ urlSessionId: String, _ completion: @escaping (_ response: Response<T>?, _ error: Error?) -> Void) {
+        
+        let cleanupRequest = {
+            urlSessionStore[urlSessionId] = nil
+        }
+                
+        urlSession.dataTask(with: request) { data, response, error in
+            
+            cleanupRequest()
+            
+            guard let httpResponse = response as? HTTPURLResponse else {
+                completion(nil, ErrorResponse.error(-2, nil, DecodableRequestBuilderError.nilHTTPResponse))
+                return
+            }
+            
+            switch T.self {
+            case is String.Type:
+                
+                if let error = error {
+                    completion(
+                        nil,
+                        ErrorResponse.error(httpResponse.statusCode, data, error)
+                    )
+                    return
+                }
+                
+                let body = data.flatMap { String(data: $0, encoding: .utf8) } ?? ""
+                
+                completion(
+                    Response<T>(
+                        response: httpResponse,
+                        body: body as? T
+                    ),
+                    nil
+                )
+                
+            case is Void.Type:
+                
+                if let error = error {
+                    completion(
+                        nil,
+                        ErrorResponse.error(httpResponse.statusCode, data, error)
+                    )
+                    return
+                }
+                
+                completion(
+                    Response(
+                        response: httpResponse,
+                        body: nil
+                    ),
+                    nil
+                )
+                
+            case is Data.Type:
+                
+                if let error = error {
+                    completion(
+                        nil,
+                        ErrorResponse.error(httpResponse.statusCode, data, error)
+                    )
+                    return
+                }
+                
+                completion(
+                    Response(
+                        response: httpResponse,
+                        body: data as? T
+                    ),
+                    nil
+                )
+                
+            default:
+                
+                guard error != nil else {
+                    completion(nil, ErrorResponse.error(httpResponse.statusCode, data, error!))
+                    return
+                }
+
+                guard let data = data, !data.isEmpty else {
+                    completion(nil, ErrorResponse.error(-1, nil, DecodableRequestBuilderError.emptyDataResponse))
+                    return
+                }
+
+                var responseObj: Response<T>? = nil
+
+                let decodeResult: (decodableObj: T?, error: Error?) = CodableHelper.decode(T.self, from: data)
+                if decodeResult.error == nil {
+                    responseObj = Response(response: httpResponse, body: decodeResult.decodableObj)
+                }
+
+                completion(responseObj, decodeResult.error)
+                
+            }
+        }.resume()
+        
+    }
+
+}
+
+open class SessionDelegate: NSObject, URLSessionDelegate, URLSessionDataDelegate {
     
     var credential: URLCredential?
     
@@ -445,146 +518,6 @@ open class URLSessionProgressTracker: NSObject, URLSessionDelegate, URLSessionDa
 }
 
 
-extension Data {
-    /// Append string to NSMutableData
-    ///
-    /// Rather than littering my code with calls to `dataUsingEncoding` to convert strings to NSData, and then add that data to the NSMutableData, this wraps it in a nice convenient little extension to NSMutableData. This converts using UTF-8.
-    ///
-    /// - parameter string:       The string to be added to the `NSMutableData`.
-
-    mutating func append(_ string: String) {
-        if let data = string.data(using: .utf8) {
-            append(data)
-        }
-    }
-}
-
-extension URLResponse {
-    var statusCode: Int? {
-        guard let httpResponse = self as? HTTPURLResponse else {
-            return nil
-        }
-        return httpResponse.statusCode
-    }
-}
-
-fileprivate enum DownloadException : Error {
-    case responseDataMissing
-    case responseFailed
-    case requestMissing
-    case requestMissingPath
-    case requestMissingURL
-}
-
-public enum URLSessionDecodableRequestBuilderError: Error {
-    case emptyDataResponse
-    case nilHTTPResponse
-    case jsonDecoding(DecodingError)
-    case generalError(Error)
-}
-
-open class URLSessionDecodableRequestBuilder<T:Decodable>: URLSessionRequestBuilder<T> {
-
-    override fileprivate func processRequest(urlSession: URLSession, urlRequest request: URLRequest, _ urlSessionId: String, _ completion: @escaping (_ response: Response<T>?, _ error: Error?) -> Void) {
-        
-        let cleanupRequest = {
-            urlSessionStore[urlSessionId] = nil
-        }
-                
-        urlSession.dataTask(with: request) { data, response, error in
-            
-            cleanupRequest()
-            
-            guard let httpResponse = response as? HTTPURLResponse else {
-                completion(nil, ErrorResponse.error(-2, nil, URLSessionDecodableRequestBuilderError.nilHTTPResponse))
-                return
-            }
-            
-            switch T.self {
-            case is String.Type:
-                
-                if let error = error {
-                    completion(
-                        nil,
-                        ErrorResponse.error(response?.statusCode ?? 500, data, error)
-                    )
-                    return
-                }
-                
-                let body = data.flatMap { String(data: $0, encoding: .utf8) } ?? ""
-                
-                completion(
-                    Response<T>(
-                        response: httpResponse,
-                        body: body as? T
-                    ),
-                    nil
-                )
-                
-            case is Void.Type:
-                
-                if let error = error {
-                    completion(
-                        nil,
-                        ErrorResponse.error(response?.statusCode ?? 500, data, error)
-                    )
-                    return
-                }
-                
-                completion(
-                    Response(
-                        response: httpResponse,
-                        body: nil
-                    ),
-                    nil
-                )
-                
-            case is Data.Type:
-                
-                if let error = error {
-                    completion(
-                        nil,
-                        ErrorResponse.error(response?.statusCode ?? 500, data, error)
-                    )
-                    return
-                }
-                
-                completion(
-                    Response(
-                        response: httpResponse,
-                        body: data as? T
-                    ),
-                    nil
-                )
-                
-            default:
-                
-                guard error != nil else {
-                    completion(nil, ErrorResponse.error(response?.statusCode ?? 500, data, error!))
-                    return
-                }
-
-                guard let data = data, !data.isEmpty else {
-                    completion(nil, ErrorResponse.error(-1, nil, URLSessionDecodableRequestBuilderError.emptyDataResponse))
-                    return
-                }
-
-                var responseObj: Response<T>? = nil
-
-                let decodeResult: (decodableObj: T?, error: Error?) = CodableHelper.decode(T.self, from: data)
-                if decodeResult.error == nil {
-                    responseObj = Response(response: httpResponse, body: decodeResult.decodableObj)
-                }
-
-                completion(responseObj, decodeResult.error)
-                
-            }
-        }.resume()
-        
-    }
-
-}
-
 public enum HTTPMethod1: String {
     case options = "OPTIONS"
     case get     = "GET"
@@ -620,3 +553,19 @@ class URLEncoding1: ParameterEncoding1 {
         return urlRequest
     }
 }
+
+fileprivate extension Data {
+    /// Append string to NSMutableData
+    ///
+    /// Rather than littering my code with calls to `dataUsingEncoding` to convert strings to NSData, and then add that data to the NSMutableData, this wraps it in a nice convenient little extension to NSMutableData. This converts using UTF-8.
+    ///
+    /// - parameter string:       The string to be added to the `NSMutableData`.
+
+    mutating func append(_ string: String) {
+        if let data = string.data(using: .utf8) {
+            append(data)
+        }
+    }
+}
+
+
