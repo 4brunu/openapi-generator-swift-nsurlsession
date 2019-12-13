@@ -6,6 +6,9 @@
 //
 
 import Foundation
+#if !os(macOS)
+import MobileCoreServices
+#endif
 
 class URLSessionRequestBuilderFactory: RequestBuilderFactory {
     func getNonDecodableBuilder<T>() -> RequestBuilder<T>.Type {
@@ -60,8 +63,12 @@ open class URLSessionRequestBuilder<T>: RequestBuilder<T> {
      configuration (e.g. to override the cache policy).
      */
     open func makeRequest(urlSession: URLSession, method: HTTPMethod1, encoding: ParameterEncoding1, headers: [String:String]) throws -> URLRequest {
-
-        var originalRequest = URLRequest(url: URL(string: URLString)!)
+        
+        guard let url = URL(string: URLString) else {
+            throw DownloadException.requestMissingURL
+        }
+        
+        var originalRequest = URLRequest(url: url)
         
         originalRequest.httpMethod = method.rawValue
         
@@ -79,73 +86,34 @@ open class URLSessionRequestBuilder<T>: RequestBuilder<T> {
         // Create a new manager for each request to customize its request header
         let urlSession = createURLSession()
         urlSessionStore[urlSessionId] = urlSession
+        
+        let parameters: [String: Any] = self.parameters ?? [:]
+        
+        let fileKeys = parameters.filter { $1 is NSURL }
+            .map { $0.0 }
                 
-        let encoding:ParameterEncoding1 = isBody ? JSONDataEncoding() : URLEncoding1()
-
-        let xMethod = HTTPMethod1(rawValue: method)
-        let fileKeys = parameters == nil ? [] : parameters!.filter { $1 is NSURL }
-                                                           .map { $0.0 }
-
+        let encoding: ParameterEncoding1
         if fileKeys.count > 0 {
-            
-            do {
-                
-                var request = try makeRequest(urlSession: urlSession, method: xMethod!, encoding: encoding, headers: headers)
-                            
-                for (k, v) in self.parameters! {
-                    switch v {
-                    case let fileURL as URL:
-                        
-                        let fileData = try Data(contentsOf: fileURL)
-                        
-                        if let mimeType = self.contentTypeForFormPart(fileURL: fileURL) {
-                            
-                            request = configureFileUploadRequest(urlRequest: request, name: fileURL.lastPathComponent, data: fileData, mimeType: mimeType)
-                            
-                        }
-                        else {
-                            let mimetype = mimeType(for: fileURL)
-                            
-                            request = configureFileUploadRequest(urlRequest: request, name: fileURL.lastPathComponent, data: fileData, mimeType: mimetype)
-                            
-                        }
-                    case let string as String:
-                        
-                        if let data = string.data(using: .utf8) {
-                            request = configureFileUploadRequest(urlRequest: request, name: k, data: data, mimeType: nil)
-                        }
-                                   
-                    case let number as NSNumber:
-                        
-                        if let data = number.stringValue.data(using: .utf8) {
-                            request = configureFileUploadRequest(urlRequest: request, name: k, data: data, mimeType: nil)
-                        }
-                        
-                    default:
-                        fatalError("Unprocessable value \(v) with key \(k)")
-                    }
-                }
-                
-                onProgressReady?(sessionDelegate.progress)
-                
-                processRequest(urlSession: urlSession, urlRequest: request, urlSessionId, completion)
-                
-            } catch {
-                completion(nil, ErrorResponse.error(415, nil, error))
-            }
-            
+            encoding = FileUploadEncoding(contentTypeForFormPart: contentTypeForFormPart(fileURL:))
+        } else if isBody {
+            encoding = JSONDataEncoding()
         } else {
+            encoding = URLEncoding1()
+        }
+        
+        guard let xMethod = HTTPMethod1(rawValue: method) else {
+            fatalError("Unsuported Http method - \(method)")
+        }
+        
+        do {
+            let request = try makeRequest(urlSession: urlSession, method: xMethod, encoding: encoding, headers: headers)
             
-            do {
-                let request = try makeRequest(urlSession: urlSession, method: xMethod!, encoding: encoding, headers: headers)
-                
-                onProgressReady?(sessionDelegate.progress)
-                
-                processRequest(urlSession: urlSession, urlRequest: request, urlSessionId, completion)
-                
-            } catch {
-                completion(nil, ErrorResponse.error(415, nil, error))
-            }
+            onProgressReady?(sessionDelegate.progress)
+            
+            processRequest(urlSession: urlSession, urlRequest: request, urlSessionId, completion)
+            
+        } catch {
+            completion(nil, ErrorResponse.error(415, nil, error))
         }
 
     }
@@ -197,10 +165,6 @@ open class URLSessionRequestBuilder<T>: RequestBuilder<T> {
                         throw DownloadException.responseDataMissing
                     }
                     
-//                    guard let request = request else {
-//                        throw DownloadException.requestMissing
-//                    }
-                    
                     let fileManager = FileManager.default
                     let documentsDirectory = fileManager.urls(for: .documentDirectory, in: .userDomainMask)[0]
                     let requestURL = try self.getURL(from: urlRequest)
@@ -220,7 +184,7 @@ open class URLSessionRequestBuilder<T>: RequestBuilder<T> {
                     completion(
                         Response(
                             response: httpResponse,
-                            body: (filePath as! T)
+                            body: (filePath as? T)
                         ),
                         nil
                     )
@@ -274,40 +238,12 @@ open class URLSessionRequestBuilder<T>: RequestBuilder<T> {
     open func buildHeaders() -> [String: String] {
         #warning("Should we define some default http headers?")
 //        var httpHeaders = SessionManager.defaultHTTPHeaders
+        
         var httpHeaders: [String: String] = [:]
         for (key, value) in self.headers {
             httpHeaders[key] = value
         }
         return httpHeaders
-    }
-    
-    fileprivate func configureFileUploadRequest(urlRequest: URLRequest, name: String, data: Data, mimeType: String?) -> URLRequest {
-
-        var urlRequest = urlRequest
-
-        var body = urlRequest.httpBody ?? Data()
-        
-        // https://stackoverflow.com/a/26163136/976628
-        let boundary = "Boundary-\(UUID().uuidString)"
-        urlRequest.addValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
-        
-        body.append("--\(boundary)\r\n")
-        body.append("Content-Disposition: form-data; name=\"\(name)\"; filename=\"\(name)\"\r\n")
-        
-        if let mimeType = mimeType {
-            body.append("Content-Type: \(mimeType)\r\n\r\n")
-        }
-        
-        body.append(data)
-
-        body.append("\r\n")
-
-        body.append("--\(boundary)--\r\n")
-
-        urlRequest.httpBody = body
-        
-        return urlRequest
-
     }
 
     fileprivate func getFileName(fromContentDisposition contentDisposition : String?) -> String? {
@@ -359,17 +295,6 @@ open class URLSessionRequestBuilder<T>: RequestBuilder<T> {
         }
 
         return url
-    }
-    
-    func mimeType(for url: URL) -> String {
-        let pathExtension = url.pathExtension
-
-        if let uti = UTTypeCreatePreferredIdentifierForTag(kUTTagClassFilenameExtension, pathExtension as NSString, nil)?.takeRetainedValue() {
-            if let mimetype = UTTypeCopyPreferredTagWithClass(uti, kUTTagClassMIMEType)?.takeRetainedValue() {
-                return mimetype as String
-            }
-        }
-        return "application/octet-stream"
     }
 
 }
@@ -450,13 +375,13 @@ open class URLSessionDecodableRequestBuilder<T:Decodable>: URLSessionRequestBuil
                 
             default:
                 
-                guard error != nil else {
-                    completion(nil, ErrorResponse.error(httpResponse.statusCode, data, error!))
+                if let error = error {
+                    completion(nil, ErrorResponse.error(httpResponse.statusCode, data, error))
                     return
                 }
 
                 guard let data = data, !data.isEmpty else {
-                    completion(nil, ErrorResponse.error(-1, nil, DecodableRequestBuilderError.emptyDataResponse))
+                    completion(nil, ErrorResponse.error(httpResponse.statusCode, nil, DecodableRequestBuilderError.emptyDataResponse))
                     return
                 }
 
@@ -552,6 +477,90 @@ class URLEncoding1: ParameterEncoding1 {
         
         return urlRequest
     }
+}
+
+class FileUploadEncoding: ParameterEncoding1 {
+    
+    let contentTypeForFormPart: (_ fileURL: URL) -> String?
+
+    init(contentTypeForFormPart: @escaping (_ fileURL: URL) -> String?) {
+        self.contentTypeForFormPart = contentTypeForFormPart
+    }
+    
+    func encode(_ urlRequest: URLRequest, with parameters: [String : Any]?) throws -> URLRequest {
+        
+        var urlRequest = urlRequest
+        
+        for (k, v) in parameters ?? [:] {
+            switch v {
+            case let fileURL as URL:
+                
+                let fileData = try Data(contentsOf: fileURL)
+                
+                let mimetype = self.contentTypeForFormPart(fileURL) ?? mimeType(for: fileURL)
+                
+                urlRequest = configureFileUploadRequest(urlRequest: urlRequest, name: fileURL.lastPathComponent, data: fileData, mimeType: mimetype)
+                
+            case let string as String:
+                
+                if let data = string.data(using: .utf8) {
+                    urlRequest = configureFileUploadRequest(urlRequest: urlRequest, name: k, data: data, mimeType: nil)
+                }
+                           
+            case let number as NSNumber:
+                
+                if let data = number.stringValue.data(using: .utf8) {
+                    urlRequest = configureFileUploadRequest(urlRequest: urlRequest, name: k, data: data, mimeType: nil)
+                }
+                
+            default:
+                fatalError("Unprocessable value \(v) with key \(k)")
+            }
+        }
+        
+        return urlRequest
+    }
+    
+    private func configureFileUploadRequest(urlRequest: URLRequest, name: String, data: Data, mimeType: String?) -> URLRequest {
+
+        var urlRequest = urlRequest
+
+        var body = urlRequest.httpBody ?? Data()
+        
+        // https://stackoverflow.com/a/26163136/976628
+        let boundary = "Boundary-\(UUID().uuidString)"
+        urlRequest.addValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
+        
+        body.append("--\(boundary)\r\n")
+        body.append("Content-Disposition: form-data; name=\"\(name)\"; filename=\"\(name)\"\r\n")
+        
+        if let mimeType = mimeType {
+            body.append("Content-Type: \(mimeType)\r\n\r\n")
+        }
+        
+        body.append(data)
+
+        body.append("\r\n")
+
+        body.append("--\(boundary)--\r\n")
+
+        urlRequest.httpBody = body
+        
+        return urlRequest
+
+    }
+    
+    func mimeType(for url: URL) -> String {
+        let pathExtension = url.pathExtension
+
+        if let uti = UTTypeCreatePreferredIdentifierForTag(kUTTagClassFilenameExtension, pathExtension as NSString, nil)?.takeRetainedValue() {
+            if let mimetype = UTTypeCopyPreferredTagWithClass(uti, kUTTagClassMIMEType)?.takeRetainedValue() {
+                return mimetype as String
+            }
+        }
+        return "application/octet-stream"
+    }
+    
 }
 
 fileprivate extension Data {
