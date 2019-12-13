@@ -563,6 +563,8 @@ class FileUploadEncoding: ParameterEncoding1 {
     
 }
 
+extension JSONDataEncoding: ParameterEncoding1 {}
+
 fileprivate extension Data {
     /// Append string to NSMutableData
     ///

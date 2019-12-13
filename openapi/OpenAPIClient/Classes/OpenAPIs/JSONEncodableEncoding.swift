@@ -7,7 +7,7 @@
 
 import Foundation
 
-public struct JSONDataEncoding: ParameterEncoding1 {
+public struct JSONDataEncoding {
 
     // MARK: Properties
 
