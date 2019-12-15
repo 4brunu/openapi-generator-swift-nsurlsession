@@ -23,20 +23,25 @@ class URLSessionRequestBuilderFactory: RequestBuilderFactory {
 // Store manager to retain its reference
 private var urlSessionStore = SynchronizedDictionary<String, URLSession>()
 
-open class URLSessionRequestBuilder<T>: RequestBuilder<T> {
+internal class URLSessionRequestBuilder<T>: RequestBuilder<T> {
+    
+    let progress = Progress()
+    
+    private var observation: NSKeyValueObservation?
+    
+    deinit {
+      observation?.invalidate()
+    }
     
     let sessionDelegate = SessionDelegate()
+    
+    var taskDidReceiveChallenge: ((URLSession, URLSessionTask, URLAuthenticationChallenge) -> (URLSession.AuthChallengeDisposition, URLCredential?))?
+    var taskCompletionShouldRetry: ((Data?, URLResponse?, Error?, @escaping (Bool) -> Void) -> Void)?
     
     required public init(method: String, URLString: String, parameters: [String : Any]?, isBody: Bool, headers: [String : String] = [:]) {
         super.init(method: method, URLString: URLString, parameters: parameters, isBody: isBody, headers: headers)
     }
     
-    open override func addCredential() -> Self {
-        _ = super.addCredential()
-        sessionDelegate.credential = self.credential
-        return self
-    }
-
     /**
      May be overridden by a subclass if you want to control the session
      configuration.
@@ -44,6 +49,8 @@ open class URLSessionRequestBuilder<T>: RequestBuilder<T> {
     open func createURLSession() -> URLSession {
         let configuration = URLSessionConfiguration.default
         configuration.httpAdditionalHeaders = buildHeaders()
+        sessionDelegate.credential = credential
+        sessionDelegate.taskDidReceiveChallenge = taskDidReceiveChallenge
         return URLSession(configuration: configuration, delegate: sessionDelegate, delegateQueue: nil)
     }
 
@@ -62,7 +69,7 @@ open class URLSessionRequestBuilder<T>: RequestBuilder<T> {
      May be overridden by a subclass if you want to control the request
      configuration (e.g. to override the cache policy).
      */
-    open func makeRequest(urlSession: URLSession, method: HTTPMethod1, encoding: ParameterEncoding1, headers: [String:String]) throws -> URLRequest {
+    open func createURLRequest(urlSession: URLSession, method: HTTPMethod1, encoding: ParameterEncoding1, headers: [String:String]) throws -> URLRequest {
         
         guard let url = URL(string: URLString) else {
             throw DownloadException.requestMissingURL
@@ -73,6 +80,10 @@ open class URLSessionRequestBuilder<T>: RequestBuilder<T> {
         originalRequest.httpMethod = method.rawValue
         
         buildHeaders().forEach { key, value in
+            originalRequest.addValue(value, forHTTPHeaderField: key)
+        }
+        
+        headers.forEach { key, value in
             originalRequest.addValue(value, forHTTPHeaderField: key)
         }
         
@@ -105,97 +116,122 @@ open class URLSessionRequestBuilder<T>: RequestBuilder<T> {
             fatalError("Unsuported Http method - \(method)")
         }
         
+        let cleanupRequest = {
+            urlSessionStore[urlSessionId] = nil
+            self.observation?.invalidate()
+        }
+        
         do {
-            let request = try makeRequest(urlSession: urlSession, method: xMethod, encoding: encoding, headers: headers)
+            let request = try createURLRequest(urlSession: urlSession, method: xMethod, encoding: encoding, headers: headers)
             
-            onProgressReady?(sessionDelegate.progress)
+            let dataTask = urlSession.dataTask(with: request) { [weak self] data, response, error in
+                                
+                guard let self = self else { return }
+                
+                if let taskCompletionShouldRetry = self.taskCompletionShouldRetry {
+                    
+                    taskCompletionShouldRetry(data, response, error) { shouldRetry in
+                                                
+                        if shouldRetry {
+                            self.execute(completion)
+                        } else {
+                            
+                            self.processRequestResponse(urlRequest: request, data: data, response: response, error: error, completion: completion)
+                        }
+                    }
+                } else {
+                    self.processRequestResponse(urlRequest: request, data: data, response: response, error: error, completion: completion)
+                }
+            }
+                
+            if #available(iOS 11.0, *) {
+                observation = dataTask.progress.observe(\.fractionCompleted) { newProgress, _ in
+                    self.progress.totalUnitCount = newProgress.totalUnitCount
+                    self.progress.completedUnitCount = newProgress.completedUnitCount
+                }
+                
+                onProgressReady?(progress)
+            }
             
-            processRequest(urlSession: urlSession, urlRequest: request, urlSessionId, completion)
-            
+            dataTask.resume()
+                        
         } catch {
+            cleanupRequest()
             completion(nil, ErrorResponse.error(415, nil, error))
         }
 
     }
-
-    fileprivate func processRequest(urlSession: URLSession, urlRequest: URLRequest, _ urlSessionId: String, _ completion: @escaping (_ response: Response<T>?, _ error: Error?) -> Void) {
+    
+    fileprivate func processRequestResponse(urlRequest: URLRequest, data: Data?, response: URLResponse?, error: Error?, completion: @escaping (_ response: Response<T>?, _ error: Error?) -> Void) {
         
-        let cleanupRequest = {
-            urlSessionStore[urlSessionId] = nil
+        guard let httpResponse = response as? HTTPURLResponse else {
+            completion(nil, ErrorResponse.error(-2, nil, DecodableRequestBuilderError.nilHTTPResponse))
+            return
         }
         
-        urlSession.dataTask(with: urlRequest) { data, response, error in
+        switch T.self {
+        case is String.Type:
             
-            cleanupRequest()
-            
-            guard let httpResponse = response as? HTTPURLResponse else {
-                completion(nil, ErrorResponse.error(-2, nil, DecodableRequestBuilderError.nilHTTPResponse))
+            if let error = error {
+                completion(
+                    nil,
+                    ErrorResponse.error(httpResponse.statusCode, data, error)
+                )
                 return
             }
             
-            switch T.self {
-            case is String.Type:
+            let body = data.flatMap { String(data: $0, encoding: .utf8) } ?? ""
+            
+            completion(
+                Response<T>(
+                    response: httpResponse,
+                    body: body as? T
+                ),
+                nil
+            )
+            
+        case is URL.Type:
+            do {
                 
-                if let error = error {
-                    completion(
-                        nil,
-                        ErrorResponse.error(httpResponse.statusCode, data, error)
-                    )
-                    return
+                guard error == nil else {
+                    throw DownloadException.responseFailed
                 }
                 
-                let body = data.flatMap { String(data: $0, encoding: .utf8) } ?? ""
+                guard let data = data else {
+                    throw DownloadException.responseDataMissing
+                }
+                
+                let fileManager = FileManager.default
+                let documentsDirectory = fileManager.urls(for: .documentDirectory, in: .userDomainMask)[0]
+                let requestURL = try self.getURL(from: urlRequest)
+                
+                var requestPath = try self.getPath(from: requestURL)
+                
+                if let headerFileName = self.getFileName(fromContentDisposition: httpResponse.allHeaderFields["Content-Disposition"] as? String) {
+                    requestPath = requestPath.appending("/\(headerFileName)")
+                }
+                
+                let filePath = documentsDirectory.appendingPathComponent(requestPath)
+                let directoryPath = filePath.deletingLastPathComponent().path
+                
+                try fileManager.createDirectory(atPath: directoryPath, withIntermediateDirectories: true, attributes: nil)
+                try data.write(to: filePath, options: .atomic)
                 
                 completion(
-                    Response<T>(
+                    Response(
                         response: httpResponse,
-                        body: body as? T
+                        body: (filePath as? T)
                     ),
                     nil
                 )
                 
-            case is URL.Type:
-                do {
-                    
-                    guard error == nil else {
-                        throw DownloadException.responseFailed
-                    }
-                    
-                    guard let data = data else {
-                        throw DownloadException.responseDataMissing
-                    }
-                    
-                    let fileManager = FileManager.default
-                    let documentsDirectory = fileManager.urls(for: .documentDirectory, in: .userDomainMask)[0]
-                    let requestURL = try self.getURL(from: urlRequest)
-                    
-                    var requestPath = try self.getPath(from: requestURL)
-                    
-                    if let headerFileName = self.getFileName(fromContentDisposition: httpResponse.allHeaderFields["Content-Disposition"] as? String) {
-                        requestPath = requestPath.appending("/\(headerFileName)")
-                    }
-                    
-                    let filePath = documentsDirectory.appendingPathComponent(requestPath)
-                    let directoryPath = filePath.deletingLastPathComponent().path
-                    
-                    try fileManager.createDirectory(atPath: directoryPath, withIntermediateDirectories: true, attributes: nil)
-                    try data.write(to: filePath, options: .atomic)
-                    
-                    completion(
-                        Response(
-                            response: httpResponse,
-                            body: (filePath as? T)
-                        ),
-                        nil
-                    )
-                    
-                } catch let requestParserError as DownloadException {
-                    completion(nil, ErrorResponse.error(400, data, requestParserError))
-                } catch let error {
-                    completion(nil, ErrorResponse.error(400, data, error))
-                }
+            } catch let requestParserError as DownloadException {
+                completion(nil, ErrorResponse.error(400, data, requestParserError))
+            } catch let error {
+                completion(nil, ErrorResponse.error(400, data, error))
+            }
             
-            case is Void.Type:
+        case is Void.Type:
             
             if let error = error {
                 completion(
@@ -213,7 +249,7 @@ open class URLSessionRequestBuilder<T>: RequestBuilder<T> {
                 nil
             )
             
-            default:
+        default:
             
             if let error = error {
                 completion(
@@ -231,15 +267,10 @@ open class URLSessionRequestBuilder<T>: RequestBuilder<T> {
                 nil
             )
         }
-        }.resume()
-        
     }
 
     open func buildHeaders() -> [String: String] {
-        #warning("Should we define some default http headers?")
-//        var httpHeaders = SessionManager.defaultHTTPHeaders
-        
-        var httpHeaders: [String: String] = [:]
+        var httpHeaders = OpenAPIClientAPI.customHeaders
         for (key, value) in self.headers {
             httpHeaders[key] = value
         }
@@ -299,147 +330,153 @@ open class URLSessionRequestBuilder<T>: RequestBuilder<T> {
 
 }
 
-open class URLSessionDecodableRequestBuilder<T:Decodable>: URLSessionRequestBuilder<T> {
+internal class URLSessionDecodableRequestBuilder<T:Decodable>: URLSessionRequestBuilder<T> {
+    override func processRequestResponse(urlRequest: URLRequest, data: Data?, response: URLResponse?, error: Error?, completion: @escaping (_ response: Response<T>?, _ error: Error?) -> Void) {
 
-    override fileprivate func processRequest(urlSession: URLSession, urlRequest request: URLRequest, _ urlSessionId: String, _ completion: @escaping (_ response: Response<T>?, _ error: Error?) -> Void) {
-        
-        let cleanupRequest = {
-            urlSessionStore[urlSessionId] = nil
+        guard let httpResponse = response as? HTTPURLResponse else {
+            completion(nil, ErrorResponse.error(-2, nil, DecodableRequestBuilderError.nilHTTPResponse))
+            return
         }
-                
-        urlSession.dataTask(with: request) { data, response, error in
+        
+        switch T.self {
+        case is String.Type:
             
-            cleanupRequest()
-            
-            guard let httpResponse = response as? HTTPURLResponse else {
-                completion(nil, ErrorResponse.error(-2, nil, DecodableRequestBuilderError.nilHTTPResponse))
+            if let error = error {
+                completion(
+                    nil,
+                    ErrorResponse.error(httpResponse.statusCode, data, error)
+                )
                 return
             }
             
-            switch T.self {
-            case is String.Type:
-                
-                if let error = error {
-                    completion(
-                        nil,
-                        ErrorResponse.error(httpResponse.statusCode, data, error)
-                    )
-                    return
-                }
-                
-                let body = data.flatMap { String(data: $0, encoding: .utf8) } ?? ""
-                
+            let body = data.flatMap { String(data: $0, encoding: .utf8) } ?? ""
+            
+            completion(
+                Response<T>(
+                    response: httpResponse,
+                    body: body as? T
+                ),
+                nil
+            )
+            
+        case is Void.Type:
+            
+            if let error = error {
                 completion(
-                    Response<T>(
-                        response: httpResponse,
-                        body: body as? T
-                    ),
-                    nil
+                    nil,
+                    ErrorResponse.error(httpResponse.statusCode, data, error)
                 )
-                
-            case is Void.Type:
-                
-                if let error = error {
-                    completion(
-                        nil,
-                        ErrorResponse.error(httpResponse.statusCode, data, error)
-                    )
-                    return
-                }
-                
-                completion(
-                    Response(
-                        response: httpResponse,
-                        body: nil
-                    ),
-                    nil
-                )
-                
-            case is Data.Type:
-                
-                if let error = error {
-                    completion(
-                        nil,
-                        ErrorResponse.error(httpResponse.statusCode, data, error)
-                    )
-                    return
-                }
-                
-                completion(
-                    Response(
-                        response: httpResponse,
-                        body: data as? T
-                    ),
-                    nil
-                )
-                
-            default:
-                
-                if let error = error {
-                    completion(nil, ErrorResponse.error(httpResponse.statusCode, data, error))
-                    return
-                }
-
-                guard let data = data, !data.isEmpty else {
-                    completion(nil, ErrorResponse.error(httpResponse.statusCode, nil, DecodableRequestBuilderError.emptyDataResponse))
-                    return
-                }
-
-                var responseObj: Response<T>? = nil
-
-                let decodeResult: (decodableObj: T?, error: Error?) = CodableHelper.decode(T.self, from: data)
-                if decodeResult.error == nil {
-                    responseObj = Response(response: httpResponse, body: decodeResult.decodableObj)
-                }
-
-                completion(responseObj, decodeResult.error)
-                
+                return
             }
-        }.resume()
-        
+            
+            completion(
+                Response(
+                    response: httpResponse,
+                    body: nil
+                ),
+                nil
+            )
+            
+        case is Data.Type:
+            
+            if let error = error {
+                completion(
+                    nil,
+                    ErrorResponse.error(httpResponse.statusCode, data, error)
+                )
+                return
+            }
+            
+            completion(
+                Response(
+                    response: httpResponse,
+                    body: data as? T
+                ),
+                nil
+            )
+            
+        default:
+            
+            if let error = error {
+                completion(nil, ErrorResponse.error(httpResponse.statusCode, data, error))
+                return
+            }
+            
+            guard let data = data, !data.isEmpty else {
+                completion(nil, ErrorResponse.error(httpResponse.statusCode, nil, DecodableRequestBuilderError.emptyDataResponse))
+                return
+            }
+            
+            var responseObj: Response<T>? = nil
+            
+            let decodeResult: (decodableObj: T?, error: Error?) = CodableHelper.decode(T.self, from: data)
+            if decodeResult.error == nil {
+                responseObj = Response(response: httpResponse, body: decodeResult.decodableObj)
+            }
+            
+            completion(responseObj, decodeResult.error)
+            
+        }
     }
-
 }
 
 open class SessionDelegate: NSObject, URLSessionDelegate, URLSessionDataDelegate {
     
     var credential: URLCredential?
-    
-    let progress = Progress()
+            
+    var taskDidReceiveChallenge: ((URLSession, URLSessionTask, URLAuthenticationChallenge) -> (URLSession.AuthChallengeDisposition, URLCredential?))?
 
-    public func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive response: URLResponse, completionHandler: @escaping (URLSession.ResponseDisposition) -> Void) {
-        progress.totalUnitCount = response.expectedContentLength
-        completionHandler(.allow)
-    }
-    
-    public func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
-        progress.completedUnitCount = progress.completedUnitCount + Int64(data.count)
-    }
-    
-//    public func urlSession(_ session: URLSession, task: URLSessionTask, didReceive challenge: URLAuthenticationChallenge, completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void) {
-//
-//    }
-    
-    public func urlSession(_ session: URLSession, didReceive challenge: URLAuthenticationChallenge, completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void) {
+    public func urlSession(_ session: URLSession, task: URLSessionTask, didReceive challenge: URLAuthenticationChallenge, completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void) {
 
         var disposition: URLSession.AuthChallengeDisposition = .performDefaultHandling
-        
+
         var credential: URLCredential?
 
-        if challenge.previousFailureCount > 0 {
-            disposition = .rejectProtectionSpace
+        if let taskDidReceiveChallenge = taskDidReceiveChallenge {
+            (disposition, credential) = taskDidReceiveChallenge(session, task, challenge)
         } else {
-            credential = self.credential ?? session.configuration.urlCredentialStorage?.defaultCredential(for: challenge.protectionSpace)
+            if challenge.previousFailureCount > 0 {
+                disposition = .rejectProtectionSpace
+            } else {
+                credential = self.credential ?? session.configuration.urlCredentialStorage?.defaultCredential(for: challenge.protectionSpace)
 
-            if credential != nil {
-                disposition = .useCredential
+                if credential != nil {
+                    disposition = .useCredential
+                }
             }
         }
-        
+
         completionHandler(disposition, credential)
-        
     }
     
+//    public func urlSession(_ session: URLSession, didReceive challenge: URLAuthenticationChallenge, completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void) {
+//
+//        var disposition: URLSession.AuthChallengeDisposition = .performDefaultHandling
+//
+//        var credential: URLCredential?
+//
+//        if let taskDidReceiveChallenge = taskDidReceiveChallenge {
+//            (disposition, credential) = taskDidReceiveChallenge(session, task, challenge)
+//        } else {
+//
+//
+//
+//        }
+//
+//
+//        if challenge.previousFailureCount > 0 {
+//            disposition = .rejectProtectionSpace
+//        } else {
+//            credential = self.credential ?? session.configuration.urlCredentialStorage?.defaultCredential(for: challenge.protectionSpace)
+//
+//            if credential != nil {
+//                disposition = .useCredential
+//            }
+//        }
+//
+//        completionHandler(disposition, credential)
+//
+//    }
 }
 
 
@@ -563,8 +600,6 @@ class FileUploadEncoding: ParameterEncoding1 {
     
 }
 
-extension JSONDataEncoding: ParameterEncoding1 {}
-
 fileprivate extension Data {
     /// Append string to NSMutableData
     ///
@@ -579,4 +614,4 @@ fileprivate extension Data {
     }
 }
 
-
+extension JSONDataEncoding: ParameterEncoding1 {}
