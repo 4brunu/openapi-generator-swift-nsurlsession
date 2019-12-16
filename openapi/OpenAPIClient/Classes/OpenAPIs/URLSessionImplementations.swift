@@ -74,17 +74,17 @@ internal class URLSessionRequestBuilder<T>: RequestBuilder<T> {
         guard let url = URL(string: URLString) else {
             throw DownloadException.requestMissingURL
         }
-        
+                
         var originalRequest = URLRequest(url: url)
         
         originalRequest.httpMethod = method.rawValue
         
         buildHeaders().forEach { key, value in
-            originalRequest.addValue(value, forHTTPHeaderField: key)
+            originalRequest.setValue(value, forHTTPHeaderField: key)
         }
         
         headers.forEach { key, value in
-            originalRequest.addValue(value, forHTTPHeaderField: key)
+            originalRequest.setValue(value, forHTTPHeaderField: key)
         }
         
         let modifiedRequest = try encoding.encode(originalRequest, with: parameters)
@@ -130,8 +130,10 @@ internal class URLSessionRequestBuilder<T>: RequestBuilder<T> {
                 
                 if let taskCompletionShouldRetry = self.taskCompletionShouldRetry {
                     
-                    taskCompletionShouldRetry(data, response, error) { shouldRetry in
-                                                
+                    taskCompletionShouldRetry(data, response, error) { [weak self] shouldRetry in
+                                       
+                        guard let self = self else { return }
+                        
                         if shouldRetry {
                             self.execute(completion)
                         } else {
@@ -143,8 +145,8 @@ internal class URLSessionRequestBuilder<T>: RequestBuilder<T> {
                     self.processRequestResponse(urlRequest: request, data: data, response: response, error: error, completion: completion)
                 }
             }
-                
-            if #available(iOS 11.0, *) {
+            
+            if #available(iOS 11.0, macOS 10.13, macCatalyst 13.0, tvOS 11.0, watchOS 4.0, *) {
                 observation = dataTask.progress.observe(\.fractionCompleted) { newProgress, _ in
                     self.progress.totalUnitCount = newProgress.totalUnitCount
                     self.progress.completedUnitCount = newProgress.completedUnitCount
@@ -448,37 +450,7 @@ open class SessionDelegate: NSObject, URLSessionDelegate, URLSessionDataDelegate
 
         completionHandler(disposition, credential)
     }
-    
-//    public func urlSession(_ session: URLSession, didReceive challenge: URLAuthenticationChallenge, completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void) {
-//
-//        var disposition: URLSession.AuthChallengeDisposition = .performDefaultHandling
-//
-//        var credential: URLCredential?
-//
-//        if let taskDidReceiveChallenge = taskDidReceiveChallenge {
-//            (disposition, credential) = taskDidReceiveChallenge(session, task, challenge)
-//        } else {
-//
-//
-//
-//        }
-//
-//
-//        if challenge.previousFailureCount > 0 {
-//            disposition = .rejectProtectionSpace
-//        } else {
-//            credential = self.credential ?? session.configuration.urlCredentialStorage?.defaultCredential(for: challenge.protectionSpace)
-//
-//            if credential != nil {
-//                disposition = .useCredential
-//            }
-//        }
-//
-//        completionHandler(disposition, credential)
-//
-//    }
 }
-
 
 public enum HTTPMethod1: String {
     case options = "OPTIONS"
