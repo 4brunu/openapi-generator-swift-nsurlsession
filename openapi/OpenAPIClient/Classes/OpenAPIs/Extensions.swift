@@ -65,16 +65,16 @@ extension Data: JSONEncodable {
 }
 
 private let dateFormatter: DateFormatter = {
-    if let formatter = CodableHelper.dateformatter {
-        return formatter
-    } else {
+//    if let formatter = CodableHelper.dateformatter {
+//        return formatter
+//    } else {
         let formatter = DateFormatter()
         formatter.calendar = Calendar(identifier: .iso8601)
         formatter.locale = Locale(identifier: "en_US_POSIX")
         formatter.timeZone = TimeZone(secondsFromGMT: 0)
         formatter.dateFormat = Configuration.dateFormat
         return formatter
-    }
+//    }
 }()
 
 extension Date: JSONEncodable {

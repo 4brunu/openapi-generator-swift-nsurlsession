@@ -92,7 +92,7 @@ internal class URLSessionRequestBuilder<T>: RequestBuilder<T> {
         return modifiedRequest
     }
 
-    override open func execute(_ completion: @escaping (_ response: Response<T>?, _ error: Error?) -> Void) {
+    override func execute(_ completion: @escaping (Result<Response<T>, Error>) -> Void) {
         let urlSessionId:String = UUID().uuidString
         // Create a new manager for each request to customize its request header
         let urlSession = createURLSession()
@@ -159,15 +159,15 @@ internal class URLSessionRequestBuilder<T>: RequestBuilder<T> {
                         
         } catch {
             cleanupRequest()
-            completion(nil, ErrorResponse.error(415, nil, error))
+            completion(.failure(ErrorResponse.error(415, nil, error)))
         }
 
     }
     
-    fileprivate func processRequestResponse(urlRequest: URLRequest, data: Data?, response: URLResponse?, error: Error?, completion: @escaping (_ response: Response<T>?, _ error: Error?) -> Void) {
+    fileprivate func processRequestResponse(urlRequest: URLRequest, data: Data?, response: URLResponse?, error: Error?, completion: @escaping (Result<Response<T>, Error>) -> Void) {
         
         guard let httpResponse = response as? HTTPURLResponse else {
-            completion(nil, ErrorResponse.error(-2, nil, DecodableRequestBuilderError.nilHTTPResponse))
+            completion(.failure(ErrorResponse.error(-2, nil, DecodableRequestBuilderError.nilHTTPResponse)))
             return
         }
         
@@ -175,22 +175,13 @@ internal class URLSessionRequestBuilder<T>: RequestBuilder<T> {
         case is String.Type:
             
             if let error = error {
-                completion(
-                    nil,
-                    ErrorResponse.error(httpResponse.statusCode, data, error)
-                )
+                completion(.failure(ErrorResponse.error(httpResponse.statusCode, data, error)))
                 return
             }
             
             let body = data.flatMap { String(data: $0, encoding: .utf8) } ?? ""
             
-            completion(
-                Response<T>(
-                    response: httpResponse,
-                    body: body as? T
-                ),
-                nil
-            )
+            completion(.success(Response<T>(response: httpResponse, body: body as? T)))
             
         case is URL.Type:
             do {
@@ -219,55 +210,31 @@ internal class URLSessionRequestBuilder<T>: RequestBuilder<T> {
                 try fileManager.createDirectory(atPath: directoryPath, withIntermediateDirectories: true, attributes: nil)
                 try data.write(to: filePath, options: .atomic)
                 
-                completion(
-                    Response(
-                        response: httpResponse,
-                        body: (filePath as? T)
-                    ),
-                    nil
-                )
+                completion(.success(Response(response: httpResponse, body: filePath as? T)))
                 
             } catch let requestParserError as DownloadException {
-                completion(nil, ErrorResponse.error(400, data, requestParserError))
+                completion(.failure(ErrorResponse.error(400, data, requestParserError)))
             } catch let error {
-                completion(nil, ErrorResponse.error(400, data, error))
+                completion(.failure(ErrorResponse.error(400, data, error)))
             }
             
         case is Void.Type:
             
             if let error = error {
-                completion(
-                    nil,
-                    ErrorResponse.error(httpResponse.statusCode, data, error)
-                )
+                completion(.failure(ErrorResponse.error(httpResponse.statusCode, data, error)))
                 return
             }
             
-            completion(
-                Response(
-                    response: httpResponse,
-                    body: nil
-                ),
-                nil
-            )
+            completion(.success(Response(response: httpResponse, body: nil)))
             
         default:
             
             if let error = error {
-                completion(
-                    nil,
-                    ErrorResponse.error(httpResponse.statusCode, data, error)
-                )
+                completion(.failure(ErrorResponse.error(httpResponse.statusCode, data, error)))
                 return
             }
             
-            completion(
-                Response(
-                    response: httpResponse,
-                    body: data as? T
-                ),
-                nil
-            )
+            completion(.success(Response(response: httpResponse, body: data as? T)))
         }
     }
 
@@ -333,10 +300,10 @@ internal class URLSessionRequestBuilder<T>: RequestBuilder<T> {
 }
 
 internal class URLSessionDecodableRequestBuilder<T:Decodable>: URLSessionRequestBuilder<T> {
-    override func processRequestResponse(urlRequest: URLRequest, data: Data?, response: URLResponse?, error: Error?, completion: @escaping (_ response: Response<T>?, _ error: Error?) -> Void) {
-
+    
+    override func processRequestResponse(urlRequest: URLRequest, data: Data?, response: URLResponse?, error: Error?, completion: @escaping (Result<Response<T>, Error>) -> Void) {
         guard let httpResponse = response as? HTTPURLResponse else {
-            completion(nil, ErrorResponse.error(-2, nil, DecodableRequestBuilderError.nilHTTPResponse))
+            completion(.failure(ErrorResponse.error(-2, nil, DecodableRequestBuilderError.nilHTTPResponse)))
             return
         }
         
@@ -344,80 +311,52 @@ internal class URLSessionDecodableRequestBuilder<T:Decodable>: URLSessionRequest
         case is String.Type:
             
             if let error = error {
-                completion(
-                    nil,
-                    ErrorResponse.error(httpResponse.statusCode, data, error)
-                )
+                completion(.failure(ErrorResponse.error(httpResponse.statusCode, data, error)))
                 return
             }
             
             let body = data.flatMap { String(data: $0, encoding: .utf8) } ?? ""
             
-            completion(
-                Response<T>(
-                    response: httpResponse,
-                    body: body as? T
-                ),
-                nil
-            )
+            completion(.success(Response<T>(response: httpResponse, body: body as? T)))
             
         case is Void.Type:
             
             if let error = error {
-                completion(
-                    nil,
-                    ErrorResponse.error(httpResponse.statusCode, data, error)
-                )
+                completion(.failure(ErrorResponse.error(httpResponse.statusCode, data, error)))
                 return
             }
             
-            completion(
-                Response(
-                    response: httpResponse,
-                    body: nil
-                ),
-                nil
-            )
+            completion(.success(Response(response: httpResponse, body: nil)))
             
         case is Data.Type:
             
             if let error = error {
-                completion(
-                    nil,
-                    ErrorResponse.error(httpResponse.statusCode, data, error)
-                )
+                completion(.failure(ErrorResponse.error(httpResponse.statusCode, data, error)))
                 return
             }
             
-            completion(
-                Response(
-                    response: httpResponse,
-                    body: data as? T
-                ),
-                nil
-            )
+            completion(.success(Response(response: httpResponse, body: data as? T)))
             
         default:
             
             if let error = error {
-                completion(nil, ErrorResponse.error(httpResponse.statusCode, data, error))
+                completion(.failure(ErrorResponse.error(httpResponse.statusCode, data, error)))
                 return
             }
             
             guard let data = data, !data.isEmpty else {
-                completion(nil, ErrorResponse.error(httpResponse.statusCode, nil, DecodableRequestBuilderError.emptyDataResponse))
+                completion(.failure(ErrorResponse.error(httpResponse.statusCode, nil, DecodableRequestBuilderError.emptyDataResponse)))
                 return
             }
             
-            var responseObj: Response<T>? = nil
+            let decodeResult = CodableHelper.decode(T.self, from: data)
             
-            let decodeResult: (decodableObj: T?, error: Error?) = CodableHelper.decode(T.self, from: data)
-            if decodeResult.error == nil {
-                responseObj = Response(response: httpResponse, body: decodeResult.decodableObj)
+            switch decodeResult {
+            case let .success(responseObj):
+                completion(.success(Response(response: httpResponse, body: responseObj)))
+            case let .failure(error):
+                completion(.failure(error))
             }
-            
-            completion(responseObj, decodeResult.error)
-            
         }
     }
 }
