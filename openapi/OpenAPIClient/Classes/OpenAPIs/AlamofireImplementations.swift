@@ -421,11 +421,8 @@ extension JSONDataEncoding: ParameterEncoding {
     ///
     /// - returns: The encoded request.
     public func encode(_ urlRequest: URLRequestConvertible, with parameters: Parameters?) throws -> URLRequest {
-        
         let urlRequest = try urlRequest.asURLRequest()
         
-        let jsonDataEncoding = JSONDataEncoding()
-        
-        return jsonDataEncoding.encode(urlRequest, with: parameters)
+        return self.encode(urlRequest, with: parameters)
     }
 }
